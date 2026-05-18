@@ -1,0 +1,171 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test
+    # Delegated to the canonical reusable CI workflow.
+    # See: ~/.claude/skills/mcp-server-fleet-ci-template
+    uses: wyre-technology/.github/.github/workflows/mcp-server-ci.yml@cd81e464960d82e07779febbcbf1716e22e408e4
+    with:
+      node-versions: '["20", "22"]'
+      lint-destructive-warnings: true
+    secrets: inherit
+
+  release:
+    name: Release
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      released: ${{ steps.version.outputs.released }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Semantic release
+        run: npx semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - id: version
+        run: |
+          git fetch --tags
+          LATEST_TAG=$(git tag --sort=-creatordate | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
+          if [ -z "$LATEST_TAG" ]; then
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          VERSION="${LATEST_TAG#v}"
+          TAG_SHA=$(git rev-list -n 1 "$LATEST_TAG")
+          if [ "$TAG_SHA" = "$GITHUB_SHA" ]; then
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  docker:
+    name: Docker
+    needs: [test, release]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Resolve release version
+        id: version
+        env:
+          RELEASE_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          if [ -z "$RELEASE_VERSION" ]; then
+            echo "ERROR: needs.release.outputs.version is empty" >&2
+            exit 1
+          fi
+          echo "version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GHCR_PAT }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:v${{ steps.version.outputs.version }}
+
+  mcp-registry:
+    name: Publish to MCP Registry
+    runs-on: ubuntu-latest
+    needs: [release, docker]
+    if: needs.release.outputs.released == 'true'
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      VERSION: ${{ needs.release.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" \
+            | tar xz mcp-publisher
+      - name: Stamp version into server.json
+        run: |
+          jq --arg v "$VERSION" \
+            '.version = $v | .packages[0].identifier = "ghcr.io/wyre-technology/crewhu-mcp:v" + $v' \
+            server.json > server.json.tmp
+          mv server.json.tmp server.json
+          cat server.json
+      - name: Validate server.json
+        run: ./mcp-publisher validate
+      - name: Authenticate to MCP Registry (GitHub OIDC)
+        run: ./mcp-publisher login github-oidc
+      - name: Publish to MCP Registry
+        run: ./mcp-publisher publish
+      - name: Verify registry listing
+        run: |
+          sleep 5
+          curl -sf "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.wyre-technology/crewhu-mcp" \
+            | jq '.servers[]?.server | {name, version}'
+
+  deploy:
+    name: Deploy to Azure Container Apps
+    runs-on: ubuntu-latest
+    needs: [docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Azure login (OIDC)
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5  # v2.3.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy to Azure Container Apps
+        # Skip gracefully when gwp-crewhu hasn't been provisioned yet (first publish
+        # ships the image; Bicep on the mcp-gateway repo creates the container app).
+        env:
+          GITHUB_SHA_ENV: ${{ github.sha }}
+          GITHUB_RUN_ID_ENV: ${{ github.run_id }}
+          GITHUB_REPO: ${{ github.repository }}
+        run: |
+          SHORT_SHA="${GITHUB_SHA_ENV::7}"
+          IMAGE="ghcr.io/${GITHUB_REPO}:latest"
+          if ! az containerapp show --name gwp-crewhu --resource-group mcp-gateway-prod >/dev/null 2>&1; then
+            echo "gwp-crewhu not provisioned yet — skipping deploy. Add 'crewhu' back to azure/main.bicep vendors[] in mcp-gateway to provision."
+            exit 0
+          fi
+          echo "Deploying $IMAGE to gwp-crewhu (revision tag sha-${SHORT_SHA}-${GITHUB_RUN_ID_ENV})"
+          az containerapp update \
+            --name gwp-crewhu \
+            --resource-group mcp-gateway-prod \
+            --image "$IMAGE" \
+            --set-env-vars "IMAGE_VERSION=sha-${SHORT_SHA}-${GITHUB_RUN_ID_ENV}"

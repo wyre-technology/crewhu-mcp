@@ -1,0 +1,40 @@
+{
+  "manifest_version": "0.3",
+  "name": "mcp-server-crewhu",
+  "display_name": "Crewhu MCP Server",
+  "version": "0.0.0",
+  "description": "MCP server for Crewhu — customer feedback (CSAT/NPS), employee engagement, gamification, badges, and prize management",
+  "long_description": "Provides AI assistants with structured access to Crewhu. List and search customer feedback surveys (including NPS detractors and promoters), look up employee/user records, manage recognition badges and contest targets, and inspect prize catalog + redemption history through the Model Context Protocol.",
+  "author": { "name": "Wyre Technology", "url": "https://github.com/wyre-technology" },
+  "repository": { "type": "git", "url": "https://github.com/wyre-technology/crewhu-mcp" },
+  "homepage": "https://github.com/wyre-technology/crewhu-mcp",
+  "license": "Apache-2.0",
+  "keywords": ["crewhu", "customer-feedback", "nps", "csat", "gamification", "badges", "mcp", "msp"],
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "CREWHU_API_TOKEN": "${user_config.crewhu_api_token}",
+        "MCP_TRANSPORT": "stdio"
+      }
+    }
+  },
+  "tools_generated": true,
+  "user_config": {
+    "crewhu_api_token": {
+      "type": "string",
+      "title": "Crewhu API Token",
+      "description": "Your Crewhu API token (Settings → Integrations → API)",
+      "sensitive": true,
+      "required": true
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": { "node": ">=20.0.0" },
+    "claude_desktop": ">=0.10.0"
+  }
+}
