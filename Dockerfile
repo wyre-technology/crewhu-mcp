@@ -7,7 +7,7 @@ ARG BUILD_DATE="unknown"
 
 WORKDIR /app
 
-COPY package*.json ./
+COPY package*.json .npmrc ./
 
 RUN npm ci --ignore-scripts
 
