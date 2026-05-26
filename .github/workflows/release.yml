@@ -97,7 +97,7 @@ jobs:
             printf '@wyre-technology:registry=https://npm.pkg.github.com\n'
             printf 'always-auth=true\n'
           } > .npmrc
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           push: true
