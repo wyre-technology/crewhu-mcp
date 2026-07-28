@@ -41,7 +41,7 @@
   "homepage": "https://github.com/wyre-technology/crewhu-mcp#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.3",
-    "@wyre-technology/node-crewhu": "^1.0.2"
+    "@wyre-technology/node-crewhu": "^2.0.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

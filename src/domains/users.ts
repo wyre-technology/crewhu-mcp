@@ -1,6 +1,23 @@
 import type { DomainHandler, Tool, CallToolResult } from "../utils/types.js";
+import type { User } from "@wyre-technology/node-crewhu";
 import { getClient, formatApiError } from "../utils/client.js";
 import { logger } from "../utils/logger.js";
+
+function fullName(user: User): string {
+  const name = [user.firstname, user.lastname].filter(Boolean).join(" ");
+  return name || "Unknown name";
+}
+
+function userLine(user: User): string[] {
+  const position = user.position || "Unknown position";
+  const department = user.department || "Unknown dept";
+  const location = user.location ? ` - ${user.location}` : "";
+  return [
+    `**${fullName(user)}**${user.employee_id ? ` (employee ID: ${user.employee_id})` : ""}`,
+    `${position} - ${department}${location}`,
+    ""
+  ];
+}
 
 const TOOLS: Tool[] = [
   {
@@ -11,26 +28,22 @@ const TOOLS: Tool[] = [
       properties: {
         limit: {
           type: "number",
-          description: "Maximum number of results (default: 50, max: 1000)",
+          description: "Results per page (default: 50, API max: 100)",
           minimum: 1,
-          maximum: 1000
+          maximum: 100
         },
         step: {
           type: "number",
-          description: "Pagination offset",
-          minimum: 0
+          description: "Page number, 1-based (default: 1)",
+          minimum: 1
         },
         department: {
           type: "string",
-          description: "Filter by department name"
+          description: "Filter by department name (exact match)"
         },
-        role: {
-          type: "string",
-          description: "Filter by user role"
-        },
-        active: {
+        include_inactive: {
           type: "boolean",
-          description: "Filter by active status (default: true)"
+          description: "Include inactive users (default: false, meaning only active)"
         }
       }
     }
@@ -43,7 +56,7 @@ const TOOLS: Tool[] = [
       properties: {
         id: {
           type: "string",
-          description: "User ID"
+          description: "User ID (_id)"
         }
       },
       required: ["id"]
@@ -51,17 +64,17 @@ const TOOLS: Tool[] = [
   },
   {
     name: "crewhu_users_search",
-    description: "Search users by name or email",
+    description: "Search users by name, employee ID, department, position, or location (client-side within the fetched page; the API has no search endpoint)",
     inputSchema: {
       type: "object",
       properties: {
         query: {
           type: "string",
-          description: "Search query (name or email)"
+          description: "Search query (name, employee ID, department, position, or location)"
         },
         limit: {
           type: "number",
-          description: "Maximum number of results (default: 20)",
+          description: "Users to fetch and search within (default: 100, API max: 100)",
           minimum: 1,
           maximum: 100
         }
@@ -77,17 +90,18 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
 
     switch (name) {
       case "crewhu_users_list": {
-        const params: Record<string, unknown> = {
-          limit: typeof args.limit === "number" ? args.limit : 50,
-          step: typeof args.step === "number" ? args.step : 0
-        };
-        if (args.department) params.department = args.department;
-        if (args.role) params.role = args.role;
-        if (args.active !== undefined) params.active = args.active;
+        const limit = typeof args.limit === "number" ? args.limit : 50;
+        const step = typeof args.step === "number" ? args.step : 1;
 
-        const response = await client.users.list(params);
+        const response = await client.users.list({
+          limit,
+          step,
+          ...(args.include_inactive ? {} : { inactive: false }),
+          ...(args.department ? { extraQuery: { department: args.department } } : {})
+        });
+
         const summary = [
-          `👥 **Users/Employees** (${response.items.length} of ${response.step + response.items.length}+ total)`,
+          `👥 **Users/Employees** (${response.items.length} shown, ${response.total} total)`,
           ""
         ];
 
@@ -95,17 +109,10 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
           summary.push("No users found matching the criteria.");
         } else {
           for (const user of response.items) {
-            const status = user.active ? "✅ Active" : "❌ Inactive";
-            const department = user.department || "Unknown dept";
-            const role = user.role || "Unknown role";
-            summary.push(
-              `**${user.name || "Unknown name"}** (${user.email || "no email"})`,
-              `${role} - ${department} - ${status}`,
-              ""
-            );
+            summary.push(...userLine(user));
           }
           if (response.hasMore) {
-            summary.push(`📄 More results available. Use step=${response.nextStep} for next page.`);
+            summary.push(`📄 More results available. Use step=${response.nextStep} for the next page.`);
           }
         }
 
@@ -118,16 +125,17 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
         const id = args.id as string;
         const user = await client.users.get(id);
         const details = [
-          `👤 **User Details** - ID: ${user.id}`,
+          `👤 **User Details** - ID: ${user._id}`,
           "",
-          `**Name:** ${user.name || "Unknown"}`,
-          `**Email:** ${user.email || "No email"}`,
-          `**Role:** ${user.role || "Unknown role"}`,
-          `**Department:** ${user.department || "Unknown department"}`,
-          `**Status:** ${user.active ? "✅ Active" : "❌ Inactive"}`,
-          `**Created:** ${user.created_at ? new Date(user.created_at).toLocaleString() : "Unknown"}`,
-          `**Last Updated:** ${user.updated_at ? new Date(user.updated_at).toLocaleString() : "Unknown"}`
-        ];
+          `**Name:** ${fullName(user)}`,
+          `**Employee ID:** ${user.employee_id || "Unknown"}`,
+          `**Position:** ${user.position || "Unknown"}`,
+          `**Department:** ${user.department || "Unknown"}`,
+          `**Location:** ${user.location || "Unknown"}`,
+          `**Hired:** ${user.hiredate ? new Date(user.hiredate).toLocaleDateString() : "Unknown"}`,
+          user.managed_departments?.length ? `**Manages departments:** ${user.managed_departments.join(", ")}` : "",
+          user.managed_locations?.length ? `**Manages locations:** ${user.managed_locations.join(", ")}` : ""
+        ].filter(line => line !== "");
 
         return {
           content: [{ type: "text", text: details.join("\n") }]
@@ -136,7 +144,7 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
 
       case "crewhu_users_search": {
         const query = args.query as string;
-        const limit = typeof args.limit === "number" ? args.limit : 20;
+        const limit = typeof args.limit === "number" ? args.limit : 100;
         const response = await client.users.search(query, { limit });
         const summary = [
           `🔍 **User Search Results for "${query}"** (${response.items.length} found)`,
@@ -147,14 +155,7 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
           summary.push("No users found matching your search query.");
         } else {
           for (const user of response.items) {
-            const status = user.active ? "✅ Active" : "❌ Inactive";
-            const department = user.department || "Unknown dept";
-            const role = user.role || "Unknown role";
-            summary.push(
-              `**${user.name || "Unknown name"}** (${user.email || "no email"})`,
-              `${role} - ${department} - ${status}`,
-              ""
-            );
+            summary.push(...userLine(user));
           }
         }
 

@@ -1,6 +1,21 @@
 import type { DomainHandler, Tool, CallToolResult } from "../utils/types.js";
+import type { BadgeHistory } from "@wyre-technology/node-crewhu";
 import { getClient, formatApiError } from "../utils/client.js";
 import { logger } from "../utils/logger.js";
+
+function awardLines(award: BadgeHistory): string[] {
+  const date = award.dateGiven ? new Date(award.dateGiven).toLocaleDateString() : "Unknown date";
+  const cancelled = award.dateCancelled
+    ? ` (❌ cancelled ${new Date(award.dateCancelled).toLocaleDateString()})`
+    : "";
+  return [
+    `🏆 **Badge ${award.badge || "Unknown"}** - ${date}${cancelled}`,
+    `From: ${award.fromUser || "System"} → To: ${award.toUsers?.join(", ") || "Unknown"}`,
+    award.message ? `"${award.message}"` : "",
+    award.badgePoints ? `+${award.badgePoints} points` : "",
+    ""
+  ].filter(line => line !== "");
+}
 
 const TOOLS: Tool[] = [
   {
@@ -11,13 +26,14 @@ const TOOLS: Tool[] = [
       properties: {
         limit: {
           type: "number",
-          description: "Maximum number of results (default: 50)",
+          description: "Results per page (default: 50, API max: 100)",
           minimum: 1,
-          maximum: 1000
+          maximum: 100
         },
-        category: {
-          type: "string",
-          description: "Filter by badge category"
+        step: {
+          type: "number",
+          description: "Page number, 1-based (default: 1)",
+          minimum: 1
         }
       }
     }
@@ -30,7 +46,7 @@ const TOOLS: Tool[] = [
       properties: {
         id: {
           type: "string",
-          description: "Badge ID"
+          description: "Badge ID (_id)"
         }
       },
       required: ["id"]
@@ -44,18 +60,18 @@ const TOOLS: Tool[] = [
       properties: {
         limit: {
           type: "number",
-          description: "Maximum number of results (default: 20)",
+          description: "Results per page (default: 20, API max: 100)",
           minimum: 1,
           maximum: 100
         },
         step: {
           type: "number",
-          description: "Pagination offset",
-          minimum: 0
+          description: "Page number, 1-based (default: 1)",
+          minimum: 1
         },
         user_id: {
           type: "string",
-          description: "Filter by specific user ID"
+          description: "Filter by recipient user ID"
         },
         badge_id: {
           type: "string",
@@ -63,11 +79,11 @@ const TOOLS: Tool[] = [
         },
         awarded_by: {
           type: "string",
-          description: "Filter by who awarded the badge"
+          description: "Filter by the giver's user ID"
         },
         since: {
           type: "string",
-          description: "Return awards since this date (ISO string)"
+          description: "Return awards updated since this date (ISO string)"
         }
       }
     }
@@ -84,7 +100,7 @@ const TOOLS: Tool[] = [
         },
         limit: {
           type: "number",
-          description: "Maximum number of results (default: 20)",
+          description: "Maximum number of results (default: 20, max: 100)",
           minimum: 1,
           maximum: 100
         }
@@ -127,14 +143,12 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
 
     switch (name) {
       case "crewhu_badges_list": {
-        const params: { limit?: number; category?: string } = {
-          limit: typeof args.limit === "number" ? args.limit : 50
-        };
-        if (args.category) params.category = args.category as string;
+        const limit = typeof args.limit === "number" ? args.limit : 50;
+        const step = typeof args.step === "number" ? args.step : 1;
 
-        const response = await client.badges.list(params);
+        const response = await client.badges.list({ limit, step });
         const summary = [
-          `🏆 **Available Badges** (${response.items.length} found)`,
+          `🏆 **Available Badges** (${response.items.length} shown, ${response.total} total)`,
           ""
         ];
 
@@ -142,14 +156,14 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
           summary.push("No badges found.");
         } else {
           for (const badge of response.items) {
-            const points = badge.points ? `${badge.points} points` : "No points";
-            const category = badge.category || "Uncategorized";
             summary.push(
-              `**${badge.name || "Unknown badge"}** (${category})`,
+              `**${badge.name || "Unknown badge"}**`,
               badge.description || "No description",
-              `Points: ${points}`,
               ""
             );
+          }
+          if (response.hasMore) {
+            summary.push(`📄 More results available. Use step=${response.nextStep} for the next page.`);
           }
         }
 
@@ -162,14 +176,11 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
         const id = args.id as string;
         const badge = await client.badges.get(id);
         const details = [
-          `🏆 **Badge Details** - ID: ${badge.id}`,
+          `🏆 **Badge Details** - ID: ${badge._id}`,
           "",
           `**Name:** ${badge.name || "Unknown"}`,
-          `**Category:** ${badge.category || "Uncategorized"}`,
           `**Description:** ${badge.description || "No description"}`,
-          `**Points:** ${badge.points || 0}`,
-          `**Icon:** ${badge.icon || "None"}`,
-          `**Created:** ${badge.created_at ? new Date(badge.created_at).toLocaleString() : "Unknown"}`
+          `**Image:** ${badge.imageFile || badge.imageClass || "None"}`
         ];
 
         return {
@@ -178,28 +189,20 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
       }
 
       case "crewhu_badges_history_list": {
-        const params: {
-          limit?: number;
-          step?: number;
-          user_id?: string;
-          badge_id?: string;
-          awarded_by?: string;
-          _updated_at?: { $gte?: string };
-        } = {
-          limit: typeof args.limit === "number" ? args.limit : 20,
-          step: typeof args.step === "number" ? args.step : 0
-        };
+        const limit = typeof args.limit === "number" ? args.limit : 20;
+        const step = typeof args.step === "number" ? args.step : 1;
 
-        if (args.user_id) params.user_id = args.user_id as string;
-        if (args.badge_id) params.badge_id = args.badge_id as string;
-        if (args.awarded_by) params.awarded_by = args.awarded_by as string;
-        if (args.since) {
-          params._updated_at = { $gte: args.since as string };
-        }
+        const response = await client.badgeHistory.list({
+          limit,
+          step,
+          ...(args.user_id ? { toUser: args.user_id as string } : {}),
+          ...(args.badge_id ? { badge: args.badge_id as string } : {}),
+          ...(args.awarded_by ? { extraQuery: { fromUser: args.awarded_by } } : {}),
+          ...(args.since ? { _updated_at: { $gte: args.since as string } } : {})
+        });
 
-        const response = await client.badgeHistory.list(params);
         const summary = [
-          `🏅️ **Badge Award History** (${response.items.length} awards)`,
+          `🏅️ **Badge Award History** (${response.items.length} shown, ${response.total} total)`,
           ""
         ];
 
@@ -207,21 +210,10 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
           summary.push("No badge awards found.");
         } else {
           for (const award of response.items) {
-            const date = award.created_at ? new Date(award.created_at).toLocaleDateString() : "Unknown date";
-            const points = award.points ? `+${award.points} points` : "";
-            summary.push(
-              `🏆 **Badge Award** - ${date}`,
-              `User: ${award.user_id || "Unknown"}`,
-              `Badge: ${award.badge_id || "Unknown"}`,
-              `Awarded by: ${award.awarded_by || "System"}`,
-              award.reason ? `Reason: "${award.reason}"` : "",
-              points,
-              ""
-            );
+            summary.push(...awardLines(award));
           }
-
           if (response.hasMore) {
-            summary.push(`📄 More awards available. Use step=${response.nextStep} for next page.`);
+            summary.push(`📄 More awards available. Use step=${response.nextStep} for the next page.`);
           }
         }
 
@@ -243,21 +235,12 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
         if (response.items.length === 0) {
           summary.push("No recognition awards found for this user.");
         } else {
-          let totalPoints = 0;
+          const active = response.items.filter(a => !a.dateCancelled);
+          const totalPoints = active.reduce((sum, a) => sum + (a.badgePoints || 0), 0);
+          summary.unshift(`**Total Points from Active Awards:** ${totalPoints}`, "");
           for (const award of response.items) {
-            const date = award.created_at ? new Date(award.created_at).toLocaleDateString() : "Unknown";
-            const points = award.points || 0;
-            totalPoints += points;
-            summary.push(
-              `🏆 ${award.badge_id || "Unknown badge"} - ${date}`,
-              `Awarded by: ${award.awarded_by || "System"}`,
-              award.reason ? `"${award.reason}"` : "",
-              points > 0 ? `+${points} points` : "",
-              ""
-            );
+            summary.push(...awardLines(award));
           }
-
-          summary.unshift(`**Total Points from Awards:** ${totalPoints}`, "");
         }
 
         return {
@@ -280,14 +263,12 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
         const details = [
           `✅ **Contest Updated Successfully**`,
           "",
-          `**ID:** ${contest.id}`,
+          `**ID:** ${contest._id || id}`,
           `**Name:** ${contest.name || "Unnamed contest"}`,
           `**Description:** ${contest.description || "No description"}`,
-          `**Target:** ${contest.target || 0}`,
-          `**Current Progress:** ${contest.current || 0}`,
-          `**Active:** ${contest.active ? "Yes" : "No"}`,
-          `**Start Date:** ${contest.start_date ? new Date(contest.start_date).toLocaleString() : "Not set"}`,
-          `**End Date:** ${contest.end_date ? new Date(contest.end_date).toLocaleString() : "Not set"}`
+          `**Target:** ${contest.target ?? 0}`,
+          `**Current Progress:** ${contest.current ?? 0}`,
+          `**Active:** ${contest.active ? "Yes" : "No"}`
         ];
 
         return {

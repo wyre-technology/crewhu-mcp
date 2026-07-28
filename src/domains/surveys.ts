@@ -1,61 +1,105 @@
 import type { DomainHandler, Tool, CallToolResult } from "../utils/types.js";
+import type { Survey } from "@wyre-technology/node-crewhu";
 import { getClient, formatApiError } from "../utils/client.js";
 import { logger } from "../utils/logger.js";
+
+type Sentiment = "positive" | "neutral" | "negative";
+
+/**
+ * Crewhu ratings are "5" (positive), "0" (neutral), "-5" (negative), stored
+ * as strings. Sentiment filtering happens client-side because the exact
+ * server-side type of the rating field is undocumented.
+ */
+function sentimentOf(survey: Survey): Sentiment | undefined {
+  const value = Number(survey.rating);
+  if (Number.isNaN(value)) return undefined;
+  if (value > 0) return "positive";
+  if (value < 0) return "negative";
+  return "neutral";
+}
+
+const SENTIMENT_ICON: Record<Sentiment, string> = {
+  positive: "😀",
+  neutral: "😐",
+  negative: "😞"
+};
+
+function describeRating(survey: Survey): string {
+  const sentiment = sentimentOf(survey);
+  if (!sentiment) return "No rating";
+  const label = survey.rating_label || sentiment.toUpperCase();
+  return `${SENTIMENT_ICON[sentiment]} ${label}`;
+}
+
+function customerName(survey: Survey): string {
+  return (
+    survey.customer_data?.name ||
+    survey.customer_data?.contact_name ||
+    "Unknown customer"
+  );
+}
+
+function surveyLine(survey: Survey): string[] {
+  const date = survey.closed
+    ? new Date(survey.closed).toLocaleDateString()
+    : "Not answered";
+  return [
+    `**${customerName(survey)}** - ${describeRating(survey)} - ${date}`,
+    survey.summary ? `Ticket ${survey.ticket_num || "?"}: ${survey.summary}` : survey.ticket_num ? `Ticket ${survey.ticket_num}` : "",
+    survey.comment ? `"${survey.comment}"` : "No comment provided",
+    ""
+  ].filter(line => line !== "");
+}
+
+function paginationFooter(response: { hasMore: boolean; nextStep?: number | undefined; total: number }): string[] {
+  return response.hasMore
+    ? [`📄 More results available (total: ${response.total}). Use step=${response.nextStep} for the next page.`]
+    : [];
+}
 
 const TOOLS: Tool[] = [
   {
     name: "crewhu_surveys_list",
-    description: "List customer surveys with optional filtering and pagination. Returns CSAT and NPS survey responses.",
+    description: "List customer surveys (CSAT responses) with optional filtering and pagination.",
     inputSchema: {
       type: "object",
       properties: {
         limit: {
           type: "number",
-          description: "Maximum number of results to return (default: 50, max: 1000)",
+          description: "Results per page (default: 50, API max: 100)",
           minimum: 1,
-          maximum: 1000
+          maximum: 100
         },
         step: {
           type: "number",
-          description: "Pagination offset for retrieving next page",
-          minimum: 0
+          description: "Page number, 1-based (default: 1)",
+          minimum: 1
         },
-        customer: {
+        sentiment: {
           type: "string",
-          description: "Filter by customer name"
-        },
-        agent: {
-          type: "string",
-          description: "Filter by agent name"
-        },
-        score_min: {
-          type: "number",
-          description: "Minimum score filter (for finding promoters use 9+)",
-          minimum: 0,
-          maximum: 10
-        },
-        score_max: {
-          type: "number",
-          description: "Maximum score filter (for finding detractors use 6 or less)",
-          minimum: 0,
-          maximum: 10
+          enum: ["positive", "neutral", "negative"],
+          description: "Filter by rating sentiment (positive = rating 5, neutral = 0, negative = -5). Filtered client-side within the fetched page."
         },
         since: {
           type: "string",
-          description: 'Return surveys updated since this date (ISO string, e.g., "2024-01-01T00:00:00Z")'
+          description: 'Return surveys updated since this date (ISO string, e.g., "2026-01-01T00:00:00Z")'
+        },
+        include_inactive: {
+          type: "boolean",
+          description: "Include inactive/deleted surveys (default: false, meaning only active)"
         }
       }
     }
   },
   {
     name: "crewhu_surveys_get",
-    description: "Get a specific survey by ID",
+    description: "Get a specific survey by its ID",
     inputSchema: {
       type: "object",
       properties: {
         id: {
           type: "string",
-          description: "Survey ID"
+          description: "Survey ID (_id)"
         }
       },
       required: ["id"]
@@ -63,7 +107,7 @@ const TOOLS: Tool[] = [
   },
   {
     name: "crewhu_surveys_search",
-    description: "Search surveys by text content in responses, customer names, or agent names",
+    description: "Search surveys by text in the customer comment, ticket summary, customer name, or ticket number. Searches within the most recent page of surveys (client-side; the API has no search endpoint).",
     inputSchema: {
       type: "object",
       properties: {
@@ -73,9 +117,9 @@ const TOOLS: Tool[] = [
         },
         limit: {
           type: "number",
-          description: "Maximum number of results (default: 50)",
+          description: "Surveys to fetch and search within (default: 100, API max: 100)",
           minimum: 1,
-          maximum: 1000
+          maximum: 100
         }
       },
       required: ["query"]
@@ -83,13 +127,13 @@ const TOOLS: Tool[] = [
   },
   {
     name: "crewhu_surveys_detractors",
-    description: "Get recent low-scoring surveys (detractors with score ≤ 6) for follow-up",
+    description: "Get recent negative surveys (rating -5) for follow-up and service recovery",
     inputSchema: {
       type: "object",
       properties: {
         limit: {
           type: "number",
-          description: "Maximum number of results (default: 20)",
+          description: "Maximum number of results (default: 20, max: 100)",
           minimum: 1,
           maximum: 100
         },
@@ -102,13 +146,13 @@ const TOOLS: Tool[] = [
   },
   {
     name: "crewhu_surveys_promoters",
-    description: "Get recent high-scoring surveys (promoters with score ≥ 9) for recognition",
+    description: "Get recent positive surveys (rating 5) for recognition",
     inputSchema: {
       type: "object",
       properties: {
         limit: {
           type: "number",
-          description: "Maximum number of results (default: 20)",
+          description: "Maximum number of results (default: 20, max: 100)",
           minimum: 1,
           maximum: 100
         },
@@ -121,51 +165,56 @@ const TOOLS: Tool[] = [
   }
 ];
 
+async function listBySentiment(
+  sentiment: Sentiment,
+  limit: number,
+  since: string
+): Promise<{ items: Survey[]; total: number }> {
+  const client = getClient();
+  // Sentiment is filtered client-side, so fetch a full page to filter from.
+  const response = await client.surveys.list({
+    limit: 100,
+    _updated_at: { $gte: since }
+  });
+  const items = response.items
+    .filter(s => sentimentOf(s) === sentiment)
+    .slice(0, limit);
+  return { items, total: response.total };
+}
+
 async function handleCall(name: string, args: Record<string, unknown>): Promise<CallToolResult> {
   try {
     const client = getClient();
 
     switch (name) {
       case "crewhu_surveys_list": {
-        const params: Record<string, unknown> = {
-          limit: typeof args.limit === "number" ? args.limit : 50,
-          step: typeof args.step === "number" ? args.step : 0
-        };
+        const limit = typeof args.limit === "number" ? args.limit : 50;
+        const step = typeof args.step === "number" ? args.step : 1;
+        const sentiment = args.sentiment as Sentiment | undefined;
 
-        if (args.customer) params.customer = args.customer;
-        if (args.agent) params.agent = args.agent;
-        if (args.since) {
-          params._updated_at = { $gte: args.since };
-        }
-        if (args.score_min !== undefined || args.score_max !== undefined) {
-          params.score = {};
-          if (args.score_min !== undefined) (params.score as Record<string, unknown>).$gte = args.score_min;
-          if (args.score_max !== undefined) (params.score as Record<string, unknown>).$lte = args.score_max;
-        }
+        const response = await client.surveys.list({
+          limit,
+          step,
+          ...(args.since ? { _updated_at: { $gte: args.since as string } } : {}),
+          ...(args.include_inactive ? {} : { inactive: false })
+        });
 
-        const response = await client.surveys.list(params);
+        const items = sentiment
+          ? response.items.filter(s => sentimentOf(s) === sentiment)
+          : response.items;
+
         const summary = [
-          `📊 **Survey Results** (${response.items.length} of ${response.step + response.items.length}+ total)`,
+          `📊 **Surveys** (${items.length} shown, ${response.total} total${sentiment ? `, sentiment=${sentiment} filtered client-side` : ""})`,
           ""
         ];
 
-        if (response.items.length === 0) {
+        if (items.length === 0) {
           summary.push("No surveys found matching the criteria.");
         } else {
-          for (const survey of response.items) {
-            const score = survey.score ? `${survey.score}/10` : "No score";
-            const customer = survey.customer || "Unknown customer";
-            const agent = survey.agent || "Unknown agent";
-            const date = survey.created_at ? new Date(survey.created_at).toLocaleDateString() : "Unknown date";
-            summary.push(
-              `**${customer}** (${agent}) - Score: ${score} - ${date}`,
-              survey.response ? `"${survey.response}"` : "No response text",
-              ""
-            );
+          for (const survey of items) {
+            summary.push(...surveyLine(survey));
           }
-          if (response.hasMore) {
-            summary.push(`📄 More results available. Use step=${response.nextStep} for next page.`);
-          }
+          summary.push(...paginationFooter(response));
         }
 
         return {
@@ -177,17 +226,19 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
         const id = args.id as string;
         const survey = await client.surveys.get(id);
         const details = [
-          `📊 **Survey Details** - ID: ${survey.id}`,
+          `📊 **Survey Details** - ID: ${survey._id}`,
           "",
-          `**Customer:** ${survey.customer || "Unknown"}`,
-          `**Agent:** ${survey.agent || "Unknown"}`,
-          `**Score:** ${survey.score ? `${survey.score}/10` : "No score"}`,
-          `**Type:** ${survey.type || "Unknown"}`,
-          `**Date:** ${survey.created_at ? new Date(survey.created_at).toLocaleString() : "Unknown"}`,
-          `**Ticket:** ${survey.ticket_id || "None"}`,
+          `**Customer:** ${customerName(survey)}`,
+          `**Contact:** ${survey.customer_data?.contact_name || "Unknown"}`,
+          `**Rating:** ${describeRating(survey)}`,
+          `**Type:** ${survey.survey_type_code || "Unknown"}`,
+          `**Answered:** ${survey.closed ? new Date(survey.closed).toLocaleString() : "Not answered"}`,
+          `**Ticket:** ${survey.ticket_num || "None"}${survey.summary ? ` — ${survey.summary}` : ""}`,
+          `**Employees credited:** ${survey.employees?.length ? survey.employees.join(", ") : "None"}`,
+          `**Reviewed by manager:** ${survey.reviewed ? "Yes" : "No"}`,
           "",
-          `**Response:**`,
-          survey.response || "No response provided"
+          `**Comment:**`,
+          survey.comment || "No comment provided"
         ];
 
         return {
@@ -197,10 +248,10 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
 
       case "crewhu_surveys_search": {
         const query = args.query as string;
-        const limit = typeof args.limit === "number" ? args.limit : 50;
+        const limit = typeof args.limit === "number" ? args.limit : 100;
         const response = await client.surveys.search(query, { limit });
         const summary = [
-          `🔍 **Search Results for "${query}"** (${response.items.length} found)`,
+          `🔍 **Search Results for "${query}"** (${response.items.length} found in the ${response.size >= response.total ? "full set" : "most recent page"})`,
           ""
         ];
 
@@ -208,14 +259,7 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
           summary.push("No surveys found matching your search query.");
         } else {
           for (const survey of response.items) {
-            const score = survey.score ? `${survey.score}/10` : "No score";
-            const customer = survey.customer || "Unknown customer";
-            const agent = survey.agent || "Unknown agent";
-            summary.push(
-              `**${customer}** (${agent}) - Score: ${score}`,
-              survey.response ? `"${survey.response}"` : "No response text",
-              ""
-            );
+            summary.push(...surveyLine(survey));
           }
         }
 
@@ -226,33 +270,19 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
 
       case "crewhu_surveys_detractors": {
         const limit = typeof args.limit === "number" ? args.limit : 20;
-        const since = args.since as string || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-        const params = {
-          score: { $lte: 6 },
-          _updated_at: { $gte: since },
-          limit
-        };
+        const since = (args.since as string) || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        const { items } = await listBySentiment("negative", limit, since);
 
-        const response = await client.surveys.list(params);
         const summary = [
-          `😞 **Recent Detractors** (Score ≤ 6) - ${response.items.length} found`,
+          `😞 **Recent Detractors** (negative rating) - ${items.length} found`,
           ""
         ];
 
-        if (response.items.length === 0) {
+        if (items.length === 0) {
           summary.push("No recent detractors found. Great job! 🎉");
         } else {
-          for (const survey of response.items) {
-            const score = survey.score || 0;
-            const customer = survey.customer || "Unknown customer";
-            const agent = survey.agent || "Unknown agent";
-            const date = survey.created_at ? new Date(survey.created_at).toLocaleDateString() : "";
-            summary.push(
-              `⚠️ **${customer}** (${agent}) - Score: ${score}/10 - ${date}`,
-              survey.response ? `"${survey.response}"` : "No feedback provided",
-              survey.ticket_id ? `Ticket: ${survey.ticket_id}` : "",
-              ""
-            );
+          for (const survey of items) {
+            summary.push(...surveyLine(survey));
           }
           summary.push("💡 Consider reaching out to these customers for follow-up and service recovery.");
         }
@@ -264,35 +294,21 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
 
       case "crewhu_surveys_promoters": {
         const limit = typeof args.limit === "number" ? args.limit : 20;
-        const since = args.since as string || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-        const params = {
-          score: { $gte: 9 },
-          _updated_at: { $gte: since },
-          limit
-        };
+        const since = (args.since as string) || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        const { items } = await listBySentiment("positive", limit, since);
 
-        const response = await client.surveys.list(params);
         const summary = [
-          `🌟 **Recent Promoters** (Score ≥ 9) - ${response.items.length} found`,
+          `🌟 **Recent Promoters** (positive rating) - ${items.length} found`,
           ""
         ];
 
-        if (response.items.length === 0) {
+        if (items.length === 0) {
           summary.push("No recent promoters found.");
         } else {
-          for (const survey of response.items) {
-            const score = survey.score || 0;
-            const customer = survey.customer || "Unknown customer";
-            const agent = survey.agent || "Unknown agent";
-            const date = survey.created_at ? new Date(survey.created_at).toLocaleDateString() : "";
-            summary.push(
-              `⭐ **${customer}** (${agent}) - Score: ${score}/10 - ${date}`,
-              survey.response ? `"${survey.response}"` : "No feedback provided",
-              survey.ticket_id ? `Ticket: ${survey.ticket_id}` : "",
-              ""
-            );
+          for (const survey of items) {
+            summary.push(...surveyLine(survey));
           }
-          summary.push("🏆 Consider recognizing these agents for excellent customer service!");
+          summary.push("🏆 Consider recognizing the credited employees for excellent customer service!");
         }
 
         return {

@@ -1,27 +1,46 @@
 import type { DomainHandler, Tool, CallToolResult } from "../utils/types.js";
+import type { PrizeHistory } from "@wyre-technology/node-crewhu";
 import { getClient, formatApiError } from "../utils/client.js";
 import { logger } from "../utils/logger.js";
+
+function redemptionLines(redemption: PrizeHistory): string[] {
+  const date = redemption.date_redeem
+    ? new Date(redemption.date_redeem).toLocaleDateString()
+    : "Unknown date";
+  const cancelled = redemption.date_cancel
+    ? ` (❌ cancelled ${new Date(redemption.date_cancel).toLocaleDateString()})`
+    : "";
+  const quantity = redemption.quantity && redemption.quantity > 1 ? ` x${redemption.quantity}` : "";
+  return [
+    `🎁 **Prize ${redemption.prize || "Unknown"}**${quantity} - ${date}${cancelled}`,
+    `User: ${redemption.user || "Unknown"}`,
+    `Status: ${redemption.status || "Unknown"}`,
+    redemption.points ? `Cost: ${redemption.points} points` : "",
+    ""
+  ].filter(line => line !== "");
+}
 
 const TOOLS: Tool[] = [
   {
     name: "crewhu_prizes_list",
-    description: "List available prizes in the reward catalog",
+    description: "List prizes in the reward catalog (the prize title is its description; prizes have no separate name field)",
     inputSchema: {
       type: "object",
       properties: {
         limit: {
           type: "number",
-          description: "Maximum number of results (default: 50)",
+          description: "Results per page (default: 50, API max: 100)",
           minimum: 1,
-          maximum: 1000
+          maximum: 100
         },
-        category: {
-          type: "string",
-          description: "Filter by prize category"
+        step: {
+          type: "number",
+          description: "Page number, 1-based (default: 1)",
+          minimum: 1
         },
         available_only: {
           type: "boolean",
-          description: "Show only available prizes (default: true)"
+          description: "Show only active prizes (default: true)"
         }
       }
     }
@@ -34,7 +53,7 @@ const TOOLS: Tool[] = [
       properties: {
         id: {
           type: "string",
-          description: "Prize ID"
+          description: "Prize ID (_id)"
         }
       },
       required: ["id"]
@@ -48,13 +67,18 @@ const TOOLS: Tool[] = [
       properties: {
         limit: {
           type: "number",
-          description: "Maximum number of results (default: 20)",
+          description: "Results per page (default: 20, API max: 100)",
           minimum: 1,
           maximum: 100
         },
+        step: {
+          type: "number",
+          description: "Page number, 1-based (default: 1)",
+          minimum: 1
+        },
         user_id: {
           type: "string",
-          description: "Filter by specific user ID"
+          description: "Filter by redeeming user ID"
         },
         prize_id: {
           type: "string",
@@ -62,12 +86,11 @@ const TOOLS: Tool[] = [
         },
         status: {
           type: "string",
-          enum: ["pending", "fulfilled", "redeemed", "cancelled"],
-          description: "Filter by redemption status"
+          description: "Filter by redemption status (exact match; status values are account-specific)"
         },
         since: {
           type: "string",
-          description: "Return redemptions since this date (ISO string)"
+          description: "Return redemptions updated since this date (ISO string)"
         }
       }
     }
@@ -84,7 +107,7 @@ const TOOLS: Tool[] = [
         },
         limit: {
           type: "number",
-          description: "Maximum number of results (default: 20)",
+          description: "Maximum number of results (default: 20, max: 100)",
           minimum: 1,
           maximum: 100
         }
@@ -94,13 +117,13 @@ const TOOLS: Tool[] = [
   },
   {
     name: "crewhu_prizes_pending_redemptions",
-    description: "Get all pending prize redemptions for processing",
+    description: "Get pending prize redemptions for processing (statuses containing 'pend' are matched client-side within the fetched page)",
     inputSchema: {
       type: "object",
       properties: {
         limit: {
           type: "number",
-          description: "Maximum number of results (default: 50)",
+          description: "Maximum number of results (default: 50, max: 100)",
           minimum: 1,
           maximum: 100
         }
@@ -116,18 +139,16 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
     switch (name) {
       case "crewhu_prizes_list": {
         const availableOnly = args.available_only !== false;
-        const params: Record<string, unknown> = {
-          limit: typeof args.limit === "number" ? args.limit : 50
-        };
-        if (args.category) params.category = args.category;
-        if (availableOnly) params.available = true;
+        const limit = typeof args.limit === "number" ? args.limit : 50;
+        const step = typeof args.step === "number" ? args.step : 1;
+        const params = { limit, step };
 
         const response = availableOnly
           ? await client.prizes.getAvailable(params)
           : await client.prizes.list(params);
 
         const summary = [
-          `🎁 **Prize Catalog** (${response.items.length} ${availableOnly ? "available " : ""}prizes)`,
+          `🎁 **Prize Catalog** (${response.items.length} shown, ${response.total} total${availableOnly ? ", active only" : ""})`,
           ""
         ];
 
@@ -135,21 +156,20 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
           summary.push("No prizes found in the catalog.");
         } else {
           for (const prize of response.items) {
-            const cost = prize.cost ? `${prize.cost} points` : "Free";
-            const category = prize.category || "Uncategorized";
-            const availability = prize.available ? "✅ Available" : "❌ Not Available";
-
             summary.push(
-              `**${prize.name || "Unknown prize"}** (${category})`,
-              prize.description || "No description",
-              `Cost: ${cost} - ${availability}`,
+              `**${prize.description || "Unnamed prize"}**`,
+              `Cost: ${prize.points ? `${prize.points} points` : "Free"}${prize.taxable ? " (taxable)" : ""}`,
+              prize.prizeURL ? `URL: ${prize.prizeURL}` : "",
               ""
             );
+          }
+          if (response.hasMore) {
+            summary.push(`📄 More results available. Use step=${response.nextStep} for the next page.`);
           }
         }
 
         return {
-          content: [{ type: "text", text: summary.join("\n") }]
+          content: [{ type: "text", text: summary.join("\n").replace(/\n{3,}/g, "\n\n") }]
         };
       }
 
@@ -158,15 +178,13 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
         const prize = await client.prizes.get(id);
 
         const details = [
-          `🎁 **Prize Details** - ID: ${prize.id}`,
+          `🎁 **Prize Details** - ID: ${prize._id}`,
           "",
-          `**Name:** ${prize.name || "Unknown"}`,
-          `**Category:** ${prize.category || "Uncategorized"}`,
           `**Description:** ${prize.description || "No description"}`,
-          `**Cost:** ${prize.cost ? `${prize.cost} points` : "Free"}`,
-          `**Available:** ${prize.available ? "✅ Yes" : "❌ No"}`,
-          `**Created:** ${prize.created_at ? new Date(prize.created_at).toLocaleString() : "Unknown"}`,
-          `**Last Updated:** ${prize.updated_at ? new Date(prize.updated_at).toLocaleString() : "Unknown"}`
+          `**Cost:** ${prize.points ? `${prize.points} points` : "Free"}`,
+          `**Taxable:** ${prize.taxable ? "Yes" : "No"}`,
+          `**URL:** ${prize.prizeURL || "None"}`,
+          `**Image:** ${prize.image || "None"}`
         ];
 
         return {
@@ -175,20 +193,20 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
       }
 
       case "crewhu_prizes_history_list": {
-        const params: Record<string, unknown> = {
-          limit: typeof args.limit === "number" ? args.limit : 20
-        };
-        if (args.user_id) params.user_id = args.user_id;
-        if (args.prize_id) params.prize_id = args.prize_id;
-        if (args.status) params.status = args.status;
-        if (args.since) {
-          params._updated_at = { $gte: args.since };
-        }
+        const limit = typeof args.limit === "number" ? args.limit : 20;
+        const step = typeof args.step === "number" ? args.step : 1;
 
-        const response = await client.prizeHistory.list(params);
+        const response = await client.prizeHistory.list({
+          limit,
+          step,
+          ...(args.user_id ? { user: args.user_id as string } : {}),
+          ...(args.prize_id ? { prize: args.prize_id as string } : {}),
+          ...(args.status ? { status: args.status as string } : {}),
+          ...(args.since ? { _updated_at: { $gte: args.since as string } } : {})
+        });
 
         const summary = [
-          `📋 **Prize Redemption History** (${response.items.length} redemptions)`,
+          `📋 **Prize Redemption History** (${response.items.length} shown, ${response.total} total)`,
           ""
         ];
 
@@ -196,20 +214,10 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
           summary.push("No prize redemptions found.");
         } else {
           for (const redemption of response.items) {
-            const date = redemption.created_at ? new Date(redemption.created_at).toLocaleDateString() : "Unknown";
-            const redeemedDate = redemption.redeemed_at ? new Date(redemption.redeemed_at).toLocaleDateString() : "Not redeemed";
-            const status = redemption.status || "Unknown";
-            const cost = redemption.cost ? `${redemption.cost} points` : "Free";
-
-            summary.push(
-              `🎁 **Prize Redemption** - ${date}`,
-              `User: ${redemption.user_id || "Unknown"}`,
-              `Prize: ${redemption.prize_id || "Unknown"}`,
-              `Status: ${status}`,
-              `Cost: ${cost}`,
-              `Redeemed: ${redeemedDate}`,
-              ""
-            );
+            summary.push(...redemptionLines(redemption));
+          }
+          if (response.hasMore) {
+            summary.push(`📄 More results available. Use step=${response.nextStep} for the next page.`);
           }
         }
 
@@ -232,21 +240,12 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
         if (response.items.length === 0) {
           summary.push("No prize redemptions found for this user.");
         } else {
-          let totalCost = 0;
+          const active = response.items.filter(r => !r.date_cancel);
+          const totalPoints = active.reduce((sum, r) => sum + (r.points || 0) * (r.quantity || 1), 0);
+          summary.unshift(`**Total Points Spent (active redemptions):** ${totalPoints}`, "");
           for (const redemption of response.items) {
-            const date = redemption.created_at ? new Date(redemption.created_at).toLocaleDateString() : "Unknown";
-            const cost = redemption.cost || 0;
-            totalCost += cost;
-            const status = redemption.status || "Unknown";
-
-            summary.push(
-              `🎁 ${redemption.prize_id || "Unknown prize"} - ${date}`,
-              `Status: ${status}`,
-              cost > 0 ? `Cost: ${cost} points` : "Free",
-              ""
-            );
+            summary.push(...redemptionLines(redemption));
           }
-          summary.unshift(`**Total Points Spent:** ${totalCost}`, "");
         }
 
         return {
@@ -268,16 +267,7 @@ async function handleCall(name: string, args: Record<string, unknown>): Promise<
           summary.push("✅ No pending prize redemptions. All caught up!");
         } else {
           for (const redemption of response.items) {
-            const date = redemption.created_at ? new Date(redemption.created_at).toLocaleDateString() : "Unknown";
-            const cost = redemption.cost ? `${redemption.cost} points` : "Free";
-
-            summary.push(
-              `⏳ **Pending** - ${date}`,
-              `User: ${redemption.user_id || "Unknown"}`,
-              `Prize: ${redemption.prize_id || "Unknown"}`,
-              `Cost: ${cost}`,
-              ""
-            );
+            summary.push(...redemptionLines(redemption));
           }
           summary.push("💡 These redemptions require manual processing or fulfillment.");
         }
