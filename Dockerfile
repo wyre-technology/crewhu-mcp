@@ -7,9 +7,12 @@ ARG BUILD_DATE="unknown"
 
 WORKDIR /app
 
-COPY package*.json .npmrc ./
+COPY package*.json ./
 
-RUN npm ci --ignore-scripts
+# GitHub Packages auth comes in as a BuildKit secret (the release workflow
+# passes --secret id=npmrc) so the token never lands in a layer or in image
+# metadata. Local builds: --secret id=npmrc,src=$HOME/.npmrc
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc npm ci --ignore-scripts
 
 COPY . .
 
