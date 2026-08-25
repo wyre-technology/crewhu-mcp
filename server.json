@@ -1,18 +1,18 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.wyre-technology/crewhu-mcp",
+  "name": "io.github.WYRE-AI/crewhu-mcp",
   "title": "Crewhu",
   "description": "MCP server for Crewhu — customer feedback (CSAT/NPS), employee engagement, and gamification.",
   "repository": {
-    "url": "https://github.com/wyre-technology/crewhu-mcp",
+    "url": "https://github.com/WYRE-AI/crewhu-mcp",
     "source": "github"
   },
   "version": "0.0.0",
-  "websiteUrl": "https://github.com/wyre-technology/crewhu-mcp",
+  "websiteUrl": "https://github.com/WYRE-AI/crewhu-mcp",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/wyre-technology/crewhu-mcp:0.0.0",
+      "identifier": "ghcr.io/wyre-ai/crewhu-mcp:0.0.0",
       "transport": {
         "type": "stdio"
       },

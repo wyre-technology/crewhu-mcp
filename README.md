@@ -7,12 +7,12 @@ A Model Context Protocol (MCP) server for Crewhu — customer feedback, employee
 
 This is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that connects Claude (or any MCP-compatible AI) to your Crewhu environment.
 
-> **Part of the [MSP Claude Plugins](https://github.com/wyre-technology) ecosystem** — a growing suite of AI integrations for the MSP stack. Built by MSPs, for MSPs.
+> **Part of the [MSP Claude Plugins](https://github.com/WYRE-AI) ecosystem** — a growing suite of AI integrations for the MSP stack. Built by MSPs, for MSPs.
 
 ## Installation
 
 ```bash
-npm install @wyre-technology/crewhu-mcp
+npm install @wyre-ai/crewhu-mcp
 ```
 
 ## Configuration
@@ -35,7 +35,7 @@ Add to your Claude Desktop `claude_desktop_config.json`:
   "mcpServers": {
     "crewhu-mcp": {
       "command": "npx",
-      "args": ["@wyre-technology/crewhu-mcp"],
+      "args": ["@wyre-ai/crewhu-mcp"],
       "env": {
         "CREWHU_API_TOKEN": "your-crewhu-api-token"
       }
@@ -49,7 +49,7 @@ Add to your Claude Desktop `claude_desktop_config.json`:
 ```bash
 claude mcp add crewhu-mcp \
   -e CREWHU_API_TOKEN=your-value \
-  -- npx -y @wyre-technology/crewhu-mcp
+  -- npx -y @wyre-ai/crewhu-mcp
 ```
 
 ### Docker
@@ -80,7 +80,7 @@ User management and engagement data
 
 ```bash
 # Clone the repository
-git clone https://github.com/wyre-technology/crewhu-mcp.git
+git clone https://github.com/WYRE-AI/crewhu-mcp.git
 cd crewhu-mcp
 
 # Install dependencies

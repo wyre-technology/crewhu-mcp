@@ -5,9 +5,9 @@
   "version": "0.0.0",
   "description": "MCP server for Crewhu — customer feedback (CSAT/NPS), employee engagement, gamification, badges, and prize management",
   "long_description": "Provides AI assistants with structured access to Crewhu. List and search customer feedback surveys (including NPS detractors and promoters), look up employee/user records, manage recognition badges and contest targets, and inspect prize catalog + redemption history through the Model Context Protocol.",
-  "author": { "name": "Wyre Technology", "url": "https://github.com/wyre-technology" },
-  "repository": { "type": "git", "url": "https://github.com/wyre-technology/crewhu-mcp" },
-  "homepage": "https://github.com/wyre-technology/crewhu-mcp",
+  "author": { "name": "Wyre Technology", "url": "https://github.com/WYRE-AI" },
+  "repository": { "type": "git", "url": "https://github.com/WYRE-AI/crewhu-mcp" },
+  "homepage": "https://github.com/WYRE-AI/crewhu-mcp",
   "license": "Apache-2.0",
   "keywords": ["crewhu", "customer-feedback", "nps", "csat", "gamification", "badges", "mcp", "msp"],
   "server": {
