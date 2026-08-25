@@ -1,5 +1,5 @@
 {
-  "name": "@wyre-technology/crewhu-mcp",
+  "name": "@wyre-ai/crewhu-mcp",
   "version": "1.0.0",
   "description": "MCP server for Crewhu — customer feedback, employee engagement, and gamification for MSPs",
   "type": "module",
@@ -22,7 +22,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/wyre-technology/crewhu-mcp.git"
+    "url": "git+https://github.com/WYRE-AI/crewhu-mcp.git"
   },
   "keywords": [
     "mcp",
@@ -36,9 +36,9 @@
   "author": "Wyre Technology",
   "license": "Apache-2.0",
   "bugs": {
-    "url": "https://github.com/wyre-technology/crewhu-mcp/issues"
+    "url": "https://github.com/WYRE-AI/crewhu-mcp/issues"
   },
-  "homepage": "https://github.com/wyre-technology/crewhu-mcp#readme",
+  "homepage": "https://github.com/WYRE-AI/crewhu-mcp#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@wyre-technology/node-crewhu": "^2.0.0"
